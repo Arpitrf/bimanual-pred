@@ -1,7 +1,7 @@
 """
 Script to train a model for contact segmentation on the bimanual dataset.
 Run as:
-    python train_bimanual_contact.py --model pointnet_part_seg --normal --log_dir bimanual_contact_pointnet_part_seg --gpu 0 --epoch 1001
+    python train_bimanual_contact.py --obj tissue --model pointnet_part_seg --normal --log_dir bimanual_contact_pointnet_part_seg --gpu 0 --epoch 1001
 """
 import argparse
 import os
@@ -41,7 +41,7 @@ def to_categorical(y, num_classes):
 def parse_args():
     parser = argparse.ArgumentParser('Model')
     parser.add_argument('--data_dir', type=str, default='data/bimanual', help='data directory')
-    parser.add_argument('--object', type=str, default='tissue', help='object name')
+    parser.add_argument('--obj', type=str, default='tissue', help='object name')
     parser.add_argument('--task', type=str, default='contact', help='Choose from: contact, axis')
     parser.add_argument('--model', type=str, default='pointnet_part_seg', help='model name')
     parser.add_argument('--batch_size', type=int, default=16, help='batch Size during training')
@@ -97,7 +97,7 @@ def main(args):
     log_string('PARAMETER ...')
     log_string(args)
 
-    datapath = osp.join(args.data_dir, args.object)
+    datapath = osp.join(args.data_dir, args.obj)
 
     TRAIN_DATASET = PartNormalDataset(root=datapath, npoints=args.npoint, task=args.task, split='train', normal_channel=args.normal)
     trainDataLoader = torch.utils.data.DataLoader(TRAIN_DATASET, batch_size=args.batch_size, shuffle=True, num_workers=10, drop_last=True)

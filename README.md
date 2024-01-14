@@ -10,7 +10,6 @@ conda install open3d-admin::open3d
 pip install --upgrade jupyter_client
 conda install anaconda::scikit-learn
 pip install tqdm
-conda install anaconda::yaml
 pip install pyyaml
 pip install addict
 pip install pandas
@@ -20,7 +19,7 @@ pip install plyfile
 ## Contact Prediction
 **Training:**
 ```
-python train_bimanual_contact.py --model pointnet_part_seg --normal --log_dir bimanual_contact_pointnet_part_seg --gpu 0 --epoch 1001
+python train_bimanual_contact.py --obj tissue --model pointnet_part_seg --normal --log_dir bimanual_contact_pointnet_part_seg --gpu 0 --epoch 1001
 ```
 
 
