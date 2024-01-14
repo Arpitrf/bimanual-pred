@@ -1,3 +1,29 @@
+# Bimanual Predictor
+
+# Conda Env
+```
+conda create -n bimanual-pred python=3.7
+conda install pytorch==1.6.0 cudatoolkit=10.1 -c pytorch
+conda install matplotlib
+conda install conda-forge::opencv
+conda install open3d-admin::open3d
+pip install --upgrade jupyter_client
+conda install anaconda::scikit-learn
+pip install tqdm
+conda install anaconda::yaml
+pip install pyyaml
+pip install addict
+pip install pandas
+pip install plyfile
+```
+
+## Contact Prediction
+**Training:**
+```
+python train_bimanual_contact.py --model pointnet_part_seg --normal --log_dir bimanual_contact_pointnet_part_seg --gpu 0 --epoch 1001
+```
+
+
 # Pytorch Implementation of PointNet and PointNet++ 
 
 This repo is implementation for [PointNet](http://openaccess.thecvf.com/content_cvpr_2017/papers/Qi_PointNet_Deep_Learning_CVPR_2017_paper.pdf) and [PointNet++](http://papers.nips.cc/paper/7095-pointnet-deep-hierarchical-feature-learning-on-point-sets-in-a-metric-space.pdf) in pytorch.
