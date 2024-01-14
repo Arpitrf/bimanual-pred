@@ -1,7 +1,7 @@
 """
 Script to train a model for contact segmentation on the bimanual dataset.
 Run as:
-    python train_bimanual_contact.py --obj tissue --model pointnet_part_seg --normal --log_dir bimanual_contact_pointnet_part_seg --gpu 0 --epoch 1001
+    python train_bimanual_contact.py --obj tissue --model pointnet_part_seg --normal --log_dir pointnet_part_seg --gpu 0 --epoch 1001
 """
 import argparse
 import os
@@ -20,6 +20,7 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from tqdm import tqdm
 from data_utils.BimanualDataLoader import PartNormalDataset
+from visualizer.bimanual_utils import visualize_pcl_contact
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = BASE_DIR
@@ -71,7 +72,7 @@ def main(args):
     timestr = str(datetime.datetime.now().strftime('%Y-%m-%d_%H-%M'))
     exp_dir = Path('./log/')
     exp_dir.mkdir(exist_ok=True)
-    exp_dir = exp_dir.joinpath('part_seg')
+    exp_dir = Path(osp.join(exp_dir, 'contact_seg', args.obj))
     exp_dir.mkdir(exist_ok=True)
     if args.log_dir is None:
         exp_dir = exp_dir.joinpath(timestr)
@@ -101,10 +102,10 @@ def main(args):
 
     TRAIN_DATASET = PartNormalDataset(root=datapath, npoints=args.npoint, task=args.task, split='train', normal_channel=args.normal)
     trainDataLoader = torch.utils.data.DataLoader(TRAIN_DATASET, batch_size=args.batch_size, shuffle=True, num_workers=10, drop_last=True)
-    TEST_DATASET = PartNormalDataset(root=datapath, npoints=args.npoint, task=args.task, split='test', normal_channel=args.normal)
-    testDataLoader = torch.utils.data.DataLoader(TEST_DATASET, batch_size=args.batch_size, shuffle=False, num_workers=10)
+    VAL_DATASET = PartNormalDataset(root=datapath, npoints=args.npoint, task=args.task, split='val', normal_channel=args.normal)
+    valDataLoader = torch.utils.data.DataLoader(VAL_DATASET, batch_size=args.batch_size, shuffle=False, num_workers=10)
     log_string("The number of training data is: %d" % len(TRAIN_DATASET))
-    log_string("The number of test data is: %d" % len(TEST_DATASET))
+    log_string("The number of val data is: %d" % len(VAL_DATASET))
 
     num_part = 3
 
@@ -203,7 +204,7 @@ def main(args):
         log_string('Train accuracy is: %.5f' % train_instance_acc)
 
         with torch.no_grad():
-            test_metrics = {}
+            val_metrics = {}
             total_correct = 0
             total_seen = 0
             total_seen_class = [0 for _ in range(num_part)]
@@ -215,23 +216,18 @@ def main(args):
 
             classifier = classifier.eval()
 
-            for batch_id, (points_in, target_in) in tqdm(enumerate(testDataLoader), total=len(testDataLoader), smoothing=0.9):
+            for batch_id, (points_in, target_in) in tqdm(enumerate(valDataLoader), total=len(valDataLoader), smoothing=0.9):
                 cur_batch_size, NUM_POINT, _ = points_in.size()
                 points, target = points_in.float().cuda(), target_in.long().cuda()
-                # print('points: ', points.shape)
-                # print('target: ', target.shape)
                 points = points.transpose(2, 1)
                 seg_pred, _ = classifier(points)
-                # print('seg_pred: ', seg_pred.shape)
                 cur_pred_val = seg_pred.cpu().data.numpy()
                 cur_pred_val_logits = cur_pred_val
                 cur_pred_val = np.zeros((cur_batch_size, NUM_POINT)).astype(np.int32)
-                # print('cur_pred_val: ', cur_pred_val.shape)
                 target = target.cpu().data.numpy()
 
                 for i in range(cur_batch_size):
                     logits = cur_pred_val_logits[i, :, :]
-                    # print('logits: ', logits.shape)
                     cur_pred_val[i, :] = np.argmax(logits, 1)
 
                 correct = np.sum(cur_pred_val == target)
@@ -264,65 +260,46 @@ def main(args):
                 savedir = viz_dir.joinpath(f'{epoch:03d}')
                 savedir.mkdir(exist_ok=True)
                 for i in range(cur_batch_size):
-                    fig, ax = plt.subplots(1,2)
                     segp = cur_pred_val[i, :]
                     segl = target_in[i, :]
-                    for idx, seg in enumerate([segl, segp]):
-                        # org_colors: Nx3, seg: N
-                        org_colors = np.zeros((NUM_POINT, 3))
-                        org_colors[seg == 0] = [0.0, 0.0, 1.0]  # no contact: blue
-                        org_colors[seg == 1] = [0.0, 1.0, 0.0]  # left contact: green
-                        org_colors[seg == 2] = [1.0, 0.0, 0.0]  # right contact: red
-                        o3d_pcl = o3d.geometry.PointCloud()
-                        o3d_pcl.points = o3d.utility.Vector3dVector(points[i,:,:3])
-                        o3d_pcl.colors = o3d.utility.Vector3dVector(org_colors)
-                        
-                        vis = o3d.visualization.Visualizer()
-                        vis.create_window(visible=False)
-                        vis.add_geometry(o3d_pcl)
-                        vis.update_geometry(o3d_pcl)
-                        vis.poll_events()
-                        vis.update_renderer()
-                        img = vis.capture_screen_float_buffer(True)
-                        vis.destroy_window()
-                        ax[idx].imshow(np.asarray(img))
-                    plt.savefig(savedir.joinpath(f'{i:02d}.png'))
+                    savepath = savedir.joinpath(f'{i:02d}.png')
+                    visualize_pcl_contact([segl, segp], NUM_POINT, points[i,:,:3], savepath)
 
-            test_metrics['accuracy'] = total_correct / float(total_seen)
-            test_metrics['iou'] = np.mean(mean_ious)
-            test_metrics['no_grasp_iou'] = np.mean(no_grasp_ious)
-            test_metrics['grasp_left_iou'] = np.mean(grasp_left_ious)
-            test_metrics['grasp_right_iou'] = np.mean(grasp_right_ious)
+            val_metrics['accuracy'] = total_correct / float(total_seen)
+            val_metrics['iou'] = np.mean(mean_ious)
+            val_metrics['no_grasp_iou'] = np.mean(no_grasp_ious)
+            val_metrics['grasp_left_iou'] = np.mean(grasp_left_ious)
+            val_metrics['grasp_right_iou'] = np.mean(grasp_right_ious)
 
-        log_string('Epoch %d test Accuracy: %f  mIOU: %f' % (
-            epoch + 1, test_metrics['accuracy'], test_metrics['iou']))
-        if (test_metrics['iou'] >= best_iou):
+        log_string('Epoch %d val Accuracy: %f  mIOU: %f' % (
+            epoch + 1, val_metrics['accuracy'], val_metrics['iou']))
+        if (val_metrics['iou'] >= best_iou):
             logger.info('Save model...')
             savepath = str(checkpoints_dir) + '/best_model.pth'
             log_string('Saving at %s' % savepath)
             state = {
                 'epoch': epoch,
                 'train_acc': train_instance_acc,
-                'test_acc': test_metrics['accuracy'],
-                'test_iou': test_metrics['iou'],
-                'test_no_grasp_iou': test_metrics['no_grasp_iou'],
-                'test_grasp_left_iou': test_metrics['grasp_left_iou'],
-                'test_grasp_right_iou': test_metrics['grasp_right_iou'],
+                'val_acc': val_metrics['accuracy'],
+                'val_iou': val_metrics['iou'],
+                'val_no_grasp_iou': val_metrics['no_grasp_iou'],
+                'val_grasp_left_iou': val_metrics['grasp_left_iou'],
+                'val_grasp_right_iou': val_metrics['grasp_right_iou'],
                 'model_state_dict': classifier.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
             }
             torch.save(state, savepath)
             log_string('Saving model....')
 
-        if test_metrics['accuracy'] > best_acc:
-            best_acc = test_metrics['accuracy']
-        if test_metrics['iou'] > best_iou:
-            best_iou = test_metrics['iou']
+        if val_metrics['accuracy'] > best_acc:
+            best_acc = val_metrics['accuracy']
+        if val_metrics['iou'] > best_iou:
+            best_iou = val_metrics['iou']
         log_string('Best accuracy is: %.5f' % best_acc)
         log_string('Best avg mIOU is: %.5f' % best_iou)
-        log_string('Best no grasp mIOU is: %.5f' % test_metrics['no_grasp_iou'])
-        log_string('Best grasp left mIOU is: %.5f' % test_metrics['grasp_left_iou'])
-        log_string('Best grasp right mIOU is: %.5f' % test_metrics['grasp_right_iou'])
+        log_string('Best no grasp mIOU is: %.5f' % val_metrics['no_grasp_iou'])
+        log_string('Best grasp left mIOU is: %.5f' % val_metrics['grasp_left_iou'])
+        log_string('Best grasp right mIOU is: %.5f' % val_metrics['grasp_right_iou'])
         global_epoch += 1
 
 

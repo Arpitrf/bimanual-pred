@@ -53,7 +53,7 @@ class PartNormalDataset(Dataset):
             # uniform random sampling
             disp_x = np.random.uniform(-self.disp_range[0], self.disp_range[0])
             disp_y = np.random.uniform(-self.disp_range[1], self.disp_range[1])
-        elif self.split == 'test':
+        elif self.split == 'val':
             # fixed values based on idx
             disp_x = -self.disp_range[0] + 2*self.disp_range[0]*idx/self.__len__()
             disp_y = -self.disp_range[1] + 2*self.disp_range[1]*idx/self.__len__()
@@ -65,7 +65,7 @@ class PartNormalDataset(Dataset):
         if self.split == 'train':
             # uniform random sampling
             self.angle_radians = np.random.uniform(-self.angle_range, self.angle_range)
-        elif self.split == 'test':
+        elif self.split == 'val':
             # fixed values based on idx
             self.angle_radians = -self.angle_range + 2*self.angle_range*idx/self.__len__()
         pcl[:,:3], axis = self.rotation_augmentation(pcl[:,:3], self.axis, self.angle_radians)
@@ -90,7 +90,7 @@ class PartNormalDataset(Dataset):
     def __len__(self):
         if self.split == 'train':
             return 16
-        elif self.split == 'test':
+        elif self.split == 'val':
             return 16
     
     def translation_augmentation(self, points, gt, disp=np.array([0.05, 0.05, 0.0])):
