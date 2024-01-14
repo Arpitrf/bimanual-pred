@@ -17,6 +17,13 @@ pip install plyfile
 ```
 
 ## Contact Prediction
+
+**Dataset:**
+Create <code>data/bimanual</code> and save point clouds within their object directories.
+An example for tissue object is provided at <code>data/bimanual/tissue/0_axis.csv</code> and <code>data/bimanual/tissue/0.csv</code>
+- <code>0.csv - Nx7 - (x, y, z, nx, ny, nz, seg) </code>
+- <code>0_axis.csv - 2x3 - s_hat, q </code>
+
 **Training:**
 ```
 python train_bimanual_contact.py --obj tissue --model pointnet_part_seg --normal --log_dir bimanual_contact_pointnet_part_seg --gpu 0 --epoch 1001
