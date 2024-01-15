@@ -1,6 +1,6 @@
 # Bimanual Predictor
 
-# Conda Env
+## Conda Env
 ```
 conda create -n bimanual-pred python=3.7
 conda install pytorch==1.6.0 cudatoolkit=10.1 -c pytorch
@@ -16,22 +16,27 @@ pip install pandas
 pip install plyfile
 ```
 
-## Contact Prediction
-
-### Dataset
+## Dataset
 
 Create <code>data/bimanual</code> and save point clouds within their object directories.
 An example for tissue object is provided at <code>data/bimanual/tissue/0_axis.csv</code> and <code>data/bimanual/tissue/0.csv</code>
 - <code>0.csv - Nx7 - (x, y, z, nx, ny, nz, seg) </code>
 - <code>0_axis.csv - 2x3 - s_hat, q </code>
 
-### Training
+## Training
 
+**Contact prediction:**
 ```
-python train_bimanual_contact.py --obj tissue --model pointnet_part_seg --normal --log_dir bimanual_contact_pointnet_part_seg --gpu 0 --epoch 1001
+python train_bimanual_contact.py --obj tissue --model pointnet_part_seg --normal --log_dir pointnet_part_seg --gpu 0 --epoch 1001
 ```
 
-### Evaluation
+**Axis prediction:**
+```
+python train_bimanual_axis.py --obj tissue --model pointnet_reg --normal --log_dir pointnet_reg --gpu 0 --epoch 1001
+```
+Set <code>--use_q</code> flag to additionally predict q values
+
+## Evaluation
 
 **Validation set:**
 
@@ -39,6 +44,7 @@ Rotations and translations of <code>0.csv</code>
 Metrics and visualizations are saved in <code>eval/metrics.txt</code> and <code>eval/viz</code>
 ```
 python test_bimanual_contact.py --obj tissue --log_dir pointnet_part_seg --normal --split val
+python test_bimanual_axis.py --obj tissue --log_dir pointnet_reg --normal --split val
 ```
 
 **Test point cloud:**
@@ -47,6 +53,7 @@ Validates single sample <code>test.csv</code> with no GT. PCL is of the form <co
 Visualizations are saved in <code>eval/test.png</code>
 ```
 python test_bimanual_contact.py --obj tissue --log_dir pointnet_part_seg --normal --split test
+python test_bimanual_axis.py --obj tissue --log_dir pointnet_reg --normal --split test
 ```
 
 

@@ -1,5 +1,5 @@
 """
-Script to test the PointNet model on the bimanual contact dataset.
+Script to test the PointNet model on the bimanual contact prediction task.
 Outputs are saved in <log-dir>/eval
 Run as:
     python test_bimanual_contact.py --obj tissue --log_dir pointnet_part_seg --normal --split val
@@ -51,6 +51,8 @@ def main(args):
     experiment_dir = osp.join('log/contact_seg', args.obj, args.log_dir)
     eval_dir = osp.join(experiment_dir, 'eval')
     os.makedirs(eval_dir, exist_ok=True)
+    savedir = osp.join(eval_dir, 'viz')
+    os.makedirs(savedir, exist_ok=True)
 
     '''LOG'''
     args = parse_args()
@@ -77,6 +79,7 @@ def main(args):
     classifier = classifier.eval()
 
     if args.split == 'test':
+
         with torch.no_grad():
             data = np.loadtxt(os.path.join(datapath, 'test.csv'), delimiter=',').astype(np.float32) # dim nx6: [x,y,z,nx,ny,nz]
             if not args.normal:
@@ -153,8 +156,6 @@ def main(args):
 
             # save visualization of predictions
             points = points.transpose(2, 1).cpu().numpy()
-            savedir = osp.join(eval_dir, 'viz')
-            os.makedirs(savedir, exist_ok=True)
             for i in range(cur_batch_size):
                 segp = cur_pred_val[i, :]
                 segl = target_in[i, :]

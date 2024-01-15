@@ -1,7 +1,7 @@
 """
-Script to train a model for contact segmentation on the bimanual dataset.
+Script to train a model for screw axis prediction on the bimanual dataset.
 Run as:
-    python train_bimanual_contact.py --obj tissue --model pointnet_part_seg --normal --log_dir pointnet_part_seg --gpu 0 --epoch 1001
+    python train_bimanual_axis.py --obj tissue --model pointnet_reg --normal --log_dir pointnet_reg --gpu 0 --epoch 1001
 """
 import argparse
 import os
@@ -18,7 +18,7 @@ import numpy as np
 from pathlib import Path
 from tqdm import tqdm
 from data_utils.BimanualDataLoader import PartNormalDataset
-from visualizer.bimanual_utils import visualize_pcl_contact
+from visualizer.bimanual_utils import visualize_pcl_axis
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = BASE_DIR
@@ -41,7 +41,8 @@ def parse_args():
     parser = argparse.ArgumentParser('Model')
     parser.add_argument('--data_dir', type=str, default='data/bimanual', help='data directory')
     parser.add_argument('--obj', type=str, default='tissue', help='object name')
-    parser.add_argument('--task', type=str, default='contact', help='Choose from: contact, axis')
+    parser.add_argument('--task', type=str, default='axis', help='Choose from: contact, axis')
+    parser.add_argument('--use_q', action='store_true', default=False, help='use q in axis prediction')
     parser.add_argument('--model', type=str, default='pointnet_part_seg', help='model name')
     parser.add_argument('--batch_size', type=int, default=16, help='batch Size during training')
     parser.add_argument('--epoch', default=501, type=int, help='epoch to run')
@@ -54,6 +55,8 @@ def parse_args():
     parser.add_argument('--normal', action='store_true', default=False, help='use normals')
     parser.add_argument('--step_size', type=int, default=20, help='decay step for lr decay')
     parser.add_argument('--lr_decay', type=float, default=0.5, help='decay rate for lr decay')
+    parser.add_argument('--mat_diff_loss_scale', type=float, default=0.001, help='weight for matching different loss')
+    parser.add_argument('--axis_loss_scale', type=float, default=1.0, help='weight for axis loss')
 
     return parser.parse_args()
 
@@ -70,8 +73,9 @@ def main(args):
     timestr = str(datetime.datetime.now().strftime('%Y-%m-%d_%H-%M'))
     exp_dir = Path('./log/')
     exp_dir.mkdir(exist_ok=True)
-    exp_dir = Path(osp.join(exp_dir, 'contact_seg', args.obj))
-    exp_dir.mkdir(exist_ok=True)
+    exp_dir = osp.join(exp_dir, 'axis_reg', args.obj)
+    os.makedirs(exp_dir, exist_ok=True)
+    exp_dir = Path(exp_dir)
     if args.log_dir is None:
         exp_dir = exp_dir.joinpath(timestr)
     else:
@@ -98,22 +102,25 @@ def main(args):
 
     datapath = osp.join(args.data_dir, args.obj)
 
-    TRAIN_DATASET = PartNormalDataset(root=datapath, npoints=args.npoint, task=args.task, split='train', normal_channel=args.normal)
+    TRAIN_DATASET = PartNormalDataset(root=datapath, npoints=args.npoint, task=args.task, split='train', normal_channel=args.normal, use_q=args.use_q)
     trainDataLoader = torch.utils.data.DataLoader(TRAIN_DATASET, batch_size=args.batch_size, shuffle=True, num_workers=10, drop_last=True)
-    VAL_DATASET = PartNormalDataset(root=datapath, npoints=args.npoint, task=args.task, split='val', normal_channel=args.normal)
+    VAL_DATASET = PartNormalDataset(root=datapath, npoints=args.npoint, task=args.task, split='val', normal_channel=args.normal, use_q=args.use_q)
     valDataLoader = torch.utils.data.DataLoader(VAL_DATASET, batch_size=args.batch_size, shuffle=False, num_workers=10)
     log_string("The number of training data is: %d" % len(TRAIN_DATASET))
     log_string("The number of val data is: %d" % len(VAL_DATASET))
 
-    num_part = 3
+    if args.use_q:
+        k = 6
+    else:
+        k = 3
 
     '''MODEL LOADING'''
     MODEL = importlib.import_module(args.model)
     shutil.copy('models/%s.py' % args.model, str(exp_dir))
     shutil.copy('models/pointnet2_utils.py', str(exp_dir))
 
-    classifier = MODEL.get_model(num_part, use_cls=False, normal_channel=args.normal).cuda()
-    criterion = MODEL.get_loss().cuda()
+    classifier = MODEL.get_model(k, normal_channel=args.normal).cuda()
+    criterion = MODEL.get_loss(mat_diff_loss_scale=args.mat_diff_loss_scale, axis_loss_scale=args.axis_loss_scale).cuda()
     classifier.apply(inplace_relu)
 
     def weights_init(m):
@@ -156,12 +163,13 @@ def main(args):
     MOMENTUM_DECCAY_STEP = args.step_size
 
     global_epoch = 0
-    best_acc = 0
-    best_iou = 0
-    best_no_grasp_iou, best_grasp_left_iou, best_grasp_right_iou = 0, 0, 0
+    best_total_loss = np.inf
+    best_axis_loss = np.inf
+    best_mat_diff_loss = np.inf
 
     for epoch in range(start_epoch, args.epoch):
-        mean_correct = []
+        train_metrics = {}
+        train_losses = {'total': [], 'axis': [], 'mat_diff': []}
 
         log_string('Epoch %d (%d/%s):' % (global_epoch + 1, epoch + 1, args.epoch))
         '''Adjust learning rate and BN momentum'''
@@ -185,126 +193,89 @@ def main(args):
             points[:, :, 0:3] = provider.random_scale_point_cloud(points[:, :, 0:3])
             points[:, :, 0:3] = provider.shift_point_cloud(points[:, :, 0:3])
             points = torch.Tensor(points)
-            points, target = points.float().cuda(), target.long().cuda()
+            points, target = points.float().cuda(), target.float().cuda()
             points = points.transpose(2, 1)
 
-            seg_pred, trans_feat = classifier(points)
-            seg_pred = seg_pred.contiguous().view(-1, num_part)
-            target = target.view(-1, 1)[:, 0]
-            pred_choice = seg_pred.data.max(1)[1]
-
-            correct = pred_choice.eq(target.data).cpu().sum()
-            mean_correct.append(correct.item() / (args.batch_size * args.npoint))
-            loss = criterion(seg_pred, target, trans_feat)
+            axis_pred, trans_feat = classifier(points)
+            # print('axis_pred: ', axis_pred.shape, type(axis_pred), axis_pred.dtype)
+            # print('target: ', target.shape, type(target), target.dtype)
+            loss_dict = criterion(axis_pred, target, trans_feat)
+            loss = loss_dict['total']
             loss.backward()
             optimizer.step()
+            train_losses['total'].append(loss.item())
+            train_losses['axis'].append(loss_dict['axis'].item())
+            train_losses['mat_diff'].append(loss_dict['mat_diff'].item())
 
-        train_instance_acc = np.mean(mean_correct)
-        log_string('Train accuracy is: %.5f' % train_instance_acc)
+        train_metrics['total_loss'] = np.mean(train_losses['total'])
+        train_metrics['axis_loss'] = np.mean(train_losses['axis'])
+        train_metrics['mat_diff_loss'] = np.mean(train_losses['mat_diff'])
+        log_string('Train Loss:\t Total: {:.4f} Axis: {:.4f} MatDiff: {:.4f}'.format(
+            train_metrics['total_loss'], train_metrics['axis_loss'], train_metrics['mat_diff_loss']))
 
         with torch.no_grad():
             val_metrics = {}
-            total_correct = 0
-            total_seen = 0
-            total_seen_class = [0 for _ in range(num_part)]
-            total_correct_class = [0 for _ in range(num_part)]
-            grasp_left_ious = []
-            grasp_right_ious = []
-            no_grasp_ious = []
-            mean_ious = []
+            val_losses = {'total': [], 'axis': [], 'mat_diff': []}
 
             classifier = classifier.eval()
 
-            for batch_id, (points_in, target_in) in tqdm(enumerate(valDataLoader), total=len(valDataLoader), smoothing=0.9):
-                cur_batch_size, NUM_POINT, _ = points_in.size()
-                points, target = points_in.float().cuda(), target_in.long().cuda()
+            for batch_id, (points, target) in tqdm(enumerate(valDataLoader), total=len(valDataLoader), smoothing=0.9):
+                cur_batch_size, NUM_POINT, _ = points.size()
+                points, target = points.float().cuda(), target.float().cuda()
                 points = points.transpose(2, 1)
-                seg_pred, _ = classifier(points)
-                cur_pred_val = seg_pred.cpu().data.numpy()
-                cur_pred_val_logits = cur_pred_val
-                cur_pred_val = np.zeros((cur_batch_size, NUM_POINT)).astype(np.int32)
-                target = target.cpu().data.numpy()
-
-                for i in range(cur_batch_size):
-                    logits = cur_pred_val_logits[i, :, :]
-                    cur_pred_val[i, :] = np.argmax(logits, 1)
-
-                correct = np.sum(cur_pred_val == target)
-                total_correct += correct
-                total_seen += (cur_batch_size * NUM_POINT)
-
-                for l in range(num_part):
-                    total_seen_class[l] += np.sum(target == l)
-                    total_correct_class[l] += (np.sum((cur_pred_val == l) & (target == l)))
-
-                for i in range(cur_batch_size):
-                    segp = cur_pred_val[i, :]
-                    segl = target[i, :]
-                    part_ious = [0.0 for _ in range(num_part)]
-                    for l in range(num_part):
-                        if (np.sum(segl == l) == 0) and (
-                                np.sum(segp == l) == 0):  # part is not present, no prediction as well
-                            part_ious[l] = 1.0
-                        else:
-                            part_ious[l] = np.sum((segl == l) & (segp == l)) / float(
-                                np.sum((segl == l) | (segp == l)))
-                    mean_ious.append(np.mean(part_ious))
-                    no_grasp_ious.append(part_ious[0])
-                    grasp_left_ious.append(part_ious[1])
-                    grasp_right_ious.append(part_ious[2])
-
+                axis_pred, trans_feat = classifier(points)
+                loss_dict = criterion(axis_pred, target, trans_feat)
+                val_losses['total'].append(loss_dict['total'].item())
+                val_losses['axis'].append(loss_dict['axis'].item())
+                val_losses['mat_diff'].append(loss_dict['mat_diff'].item())
+                
             # save visualization of predictions
             if epoch % 50 == 0:
                 points = points.transpose(2, 1).cpu().numpy()
+                axis_pred = axis_pred.cpu().data.numpy()
+                target = target.cpu().data.numpy()
                 savedir = viz_dir.joinpath(f'{epoch:03d}')
                 savedir.mkdir(exist_ok=True)
                 for i in range(cur_batch_size):
-                    segp = cur_pred_val[i, :]
-                    segl = target_in[i, :]
+                    axisp = axis_pred[i, :]
+                    axisl = target[i, :]
                     savepath = savedir.joinpath(f'{i:02d}.png')
-                    visualize_pcl_contact([segl, segp], NUM_POINT, points[i,:,:3], savepath)
+                    visualize_pcl_axis([axisl, axisp], NUM_POINT, points[i,:,:3], savepath, use_q=args.use_q)
 
-            val_metrics['accuracy'] = total_correct / float(total_seen)
-            val_metrics['iou'] = np.mean(mean_ious)
-            val_metrics['no_grasp_iou'] = np.mean(no_grasp_ious)
-            val_metrics['grasp_left_iou'] = np.mean(grasp_left_ious)
-            val_metrics['grasp_right_iou'] = np.mean(grasp_right_ious)
+            val_metrics['total_loss'] = np.mean(val_losses['total'])
+            val_metrics['axis_loss'] = np.mean(val_losses['axis'])
+            val_metrics['mat_diff_loss'] = np.mean(val_losses['mat_diff'])
 
-        log_string('Epoch %d val Accuracy: %f  mIOU: %f' % (
-            epoch + 1, val_metrics['accuracy'], val_metrics['iou']))
-        if (val_metrics['iou'] >= best_iou):
+        log_string('Epoch %d Val loss\t total: {:.4f} axis: {:.4f} mat diff: {:.4f}' .format(
+            epoch + 1, val_metrics['total_loss'], val_metrics['axis_loss'], val_metrics['mat_diff_loss']))
+        
+        if (val_metrics['total_loss'] <= best_total_loss):
             logger.info('Save model...')
             savepath = str(checkpoints_dir) + '/best_model.pth'
             log_string('Saving at %s' % savepath)
             state = {
                 'epoch': epoch,
-                'train_acc': train_instance_acc,
-                'val_acc': val_metrics['accuracy'],
-                'val_iou': val_metrics['iou'],
-                'val_no_grasp_iou': val_metrics['no_grasp_iou'],
-                'val_grasp_left_iou': val_metrics['grasp_left_iou'],
-                'val_grasp_right_iou': val_metrics['grasp_right_iou'],
+                'train_total_loss': train_metrics['total_loss'],
+                'train_axis_loss': train_metrics['axis_loss'],
+                'train_mat_diff_loss': train_metrics['mat_diff_loss'],
+                'val_total_loss': val_metrics['total_loss'],
+                'val_axis_loss': val_metrics['axis_loss'],
+                'val_mat_diff_loss': val_metrics['mat_diff_loss'],
                 'model_state_dict': classifier.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
             }
             torch.save(state, savepath)
             log_string('Saving model....')
 
-        if val_metrics['accuracy'] > best_acc:
-            best_acc = val_metrics['accuracy']
-        if val_metrics['iou'] > best_iou:
-            best_iou = val_metrics['iou']
-        if val_metrics['no_grasp_iou'] > best_no_grasp_iou:
-            best_no_grasp_iou = val_metrics['no_grasp_iou']
-        if val_metrics['grasp_left_iou'] > best_grasp_left_iou:
-            best_grasp_left_iou = val_metrics['grasp_left_iou']
-        if val_metrics['grasp_right_iou'] > best_grasp_right_iou:
-            best_grasp_right_iou = val_metrics['grasp_right_iou']
-        log_string('Best accuracy is: %.5f' % best_acc)
-        log_string('Best avg mIOU is: %.5f' % best_iou)
-        log_string('Best no grasp mIOU is: %.5f' % best_no_grasp_iou)
-        log_string('Best grasp left mIOU is: %.5f' % best_grasp_left_iou)
-        log_string('Best grasp right mIOU is: %.5f' % best_grasp_right_iou)
+        if val_metrics['total_loss'] < best_total_loss:
+            best_total_loss = val_metrics['total_loss']
+        if val_metrics['axis_loss'] < best_axis_loss:
+            best_axis_loss = val_metrics['axis_loss']
+        if val_metrics['mat_diff_loss'] < best_mat_diff_loss:
+            best_mat_diff_loss = val_metrics['mat_diff_loss']
+        log_string('Best total loss is: %.5f' % best_total_loss)
+        log_string('Best axis loss is: %.5f' % best_axis_loss)
+        log_string('Best mat diff loss is: %.5f' % best_mat_diff_loss)
         global_epoch += 1
 
 

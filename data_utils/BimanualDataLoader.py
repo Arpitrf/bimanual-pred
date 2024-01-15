@@ -47,6 +47,7 @@ class PartNormalDataset(Dataset):
         choice = np.random.choice(len(self.seg), self.npoints, replace=True)
         pcl = self.point_set[choice, :]
         seg = self.seg[choice]
+        axis = self.axis
 
         # translation
         if self.split == 'train':
@@ -59,7 +60,7 @@ class PartNormalDataset(Dataset):
             disp_y = -self.disp_range[1] + 2*self.disp_range[1]*idx/self.__len__()
         disp_z = 0.0
         disp = np.array([disp_x, disp_y, disp_z])
-        pcl[:,:3], axis = self.translation_augmentation(pcl[:,:3], self.axis, disp)
+        pcl[:,:3], axis = self.translation_augmentation(pcl[:,:3], axis, disp)
 
         # rotation
         if self.split == 'train':
@@ -68,7 +69,7 @@ class PartNormalDataset(Dataset):
         elif self.split == 'val':
             # fixed values based on idx
             self.angle_radians = -self.angle_range + 2*self.angle_range*idx/self.__len__()
-        pcl[:,:3], axis = self.rotation_augmentation(pcl[:,:3], self.axis, self.angle_radians)
+        pcl[:,:3], axis = self.rotation_augmentation(pcl[:,:3], axis, self.angle_radians)
 
         # Obtain normals
         if self.normal_channel:
@@ -106,11 +107,11 @@ class PartNormalDataset(Dataset):
         points = np.append(points, ones_column, axis=1)
         transformed_points = np.dot(points, translation_matrix.T)
         # Apply the translation to the gt
-        ones_column = np.ones((gt.shape[0], 1), dtype=points.dtype)
+        ones_column = np.ones((gt.shape[0], 1), dtype=gt.dtype)
         gt = np.append(gt, ones_column, axis=1)
         transformed_gt = np.dot(gt, translation_matrix.T)
         
-        return transformed_points[:,:3], transformed_gt
+        return transformed_points[:,:3], transformed_gt[:,:3]
 
     def rotation_augmentation(self, points, gt, angle_radians=0.1):
         # Define the 3D rotation matrix around the z-axis
