@@ -24,6 +24,13 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = BASE_DIR
 sys.path.append(os.path.join(ROOT_DIR, 'models'))
 
+def point_unnormalize(pc, point):
+    centroid = np.mean(pc, axis=0)
+    pc = pc - centroid
+    m = np.max(np.sqrt(np.sum(pc ** 2, axis=1)))
+    point_unnormalized = point * m + centroid
+    return point_unnormalized
+
 
 def parse_args():
     '''PARAMETERS'''
@@ -33,6 +40,7 @@ def parse_args():
     parser.add_argument('--split', type=str, default='val', help='Choose from: val, test')
     parser.add_argument('--task', type=str, default='axis', help='Choose from: contact, axis')
     parser.add_argument('--use_q', action='store_true', default=False, help='use q in axis prediction')
+    parser.add_argument('--use_s', action='store_true', default=False, help='use s in axis prediction')
     parser.add_argument('--log_dir', type=str, required=True, help='experiment root')
     parser.add_argument('--batch_size', type=int, default=16, help='batch size in validation')
     parser.add_argument('--gpu', type=str, default='0', help='specify gpu device')
@@ -72,7 +80,7 @@ def main(args):
 
     datapath = osp.join(args.data_dir, args.obj)
 
-    if args.use_q:
+    if args.use_q and args.use_s:
         k = 6
     else:
         k = 3
@@ -83,17 +91,19 @@ def main(args):
     classifier = MODEL.get_model(k, normal_channel=args.normal).cuda()
     criterion = MODEL.get_loss(mat_diff_loss_scale=args.mat_diff_loss_scale, axis_loss_scale=args.axis_loss_scale).cuda()
     checkpoint = torch.load(str(experiment_dir) + '/checkpoints/best_model.pth')
+    # checkpoint = torch.load(str(experiment_dir) + '/checkpoints/5500.pth')
     classifier.load_state_dict(checkpoint['model_state_dict'])
     classifier = classifier.eval()
 
     if args.split == 'test':
 
         with torch.no_grad():
-            data = np.loadtxt(os.path.join(datapath, 'test.csv'), delimiter=',').astype(np.float32) # dim nx6: [x,y,z,nx,ny,nz]
+            data = np.loadtxt(os.path.join(datapath, 'test_bottle_11.csv'), delimiter=',').astype(np.float32) # dim nx6: [x,y,z,nx,ny,nz]
             if not args.normal:
                 points = data[:, 0:3]
             else:
                 points = data[:, 0:6]
+            points_unnormalized = points[:, :3].copy()
             points[:, 0:3] = pc_normalize(points[:, 0:3])
             choice = np.random.choice(len(points), args.num_point, replace=True)
             points = points[choice, :]
@@ -104,11 +114,17 @@ def main(args):
             points = points.transpose(2, 1).cpu().numpy() # dim 1xnx6
             axisp = axis_pred[0].cpu().data.numpy() # dim 3 or 6
             savepath = osp.join(eval_dir, 'test.png')
-            visualize_pcl_axis([axisp], args.num_point, points[0,:,:3], savepath)
+            if args.use_q and args.use_s:
+                axisp_unnormalized = point_unnormalize(points_unnormalized, axisp[3:])
+                print("axisp: ", axisp[:3], axisp_unnormalized)
+            elif args.use_q:
+                axisp_unnormalized = point_unnormalize(points_unnormalized, axisp)
+                print("axisp: ", axisp_unnormalized)
+            visualize_pcl_axis([axisp], args.num_point, points[0,:,:3], savepath, args.use_q, args.use_s)
 
     elif args.split == 'val':
         
-        VAL_DATASET = PartNormalDataset(root=datapath, npoints=args.num_point, task=args.task, split='val', normal_channel=args.normal, use_q=args.use_q)
+        VAL_DATASET = PartNormalDataset(root=datapath, npoints=args.num_point, task=args.task, split='val', normal_channel=args.normal, use_q=args.use_q, use_s=args.use_s)
         valDataLoader = torch.utils.data.DataLoader(VAL_DATASET, batch_size=args.batch_size, shuffle=False, num_workers=4)
         log_string("The number of val data is: %d" % len(VAL_DATASET))
 
@@ -136,7 +152,7 @@ def main(args):
                 axisp = axis_pred[i, :]
                 axisl = target[i, :]
                 savepath = osp.join(savedir, f'{i:02d}.png')
-                visualize_pcl_axis([axisl, axisp], NUM_POINT, points[i,:,:3], savepath, use_q=args.use_q)
+                visualize_pcl_axis([axisl, axisp], NUM_POINT, points[i,:,:3], savepath, use_q=args.use_q, use_s=args.use_s)
 
             val_metrics['total_loss'] = np.mean(val_losses['total'])
             val_metrics['axis_loss'] = np.mean(val_losses['axis'])

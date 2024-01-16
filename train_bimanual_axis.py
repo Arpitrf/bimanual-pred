@@ -19,6 +19,9 @@ from pathlib import Path
 from tqdm import tqdm
 from data_utils.BimanualDataLoader import PartNormalDataset
 from visualizer.bimanual_utils import visualize_pcl_axis
+from visualizer.tensorboard_utils import log_val_q
+from open3d.visualization.tensorboard_plugin import summary
+from torch.utils.tensorboard import SummaryWriter
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = BASE_DIR
@@ -43,6 +46,7 @@ def parse_args():
     parser.add_argument('--obj', type=str, default='tissue', help='object name')
     parser.add_argument('--task', type=str, default='axis', help='Choose from: contact, axis')
     parser.add_argument('--use_q', action='store_true', default=False, help='use q in axis prediction')
+    parser.add_argument('--use_s', action='store_true', default=False, help='use s in axis prediction')
     parser.add_argument('--model', type=str, default='pointnet_part_seg', help='model name')
     parser.add_argument('--batch_size', type=int, default=16, help='batch Size during training')
     parser.add_argument('--epoch', default=501, type=int, help='epoch to run')
@@ -102,14 +106,19 @@ def main(args):
 
     datapath = osp.join(args.data_dir, args.obj)
 
-    TRAIN_DATASET = PartNormalDataset(root=datapath, npoints=args.npoint, task=args.task, split='train', normal_channel=args.normal, use_q=args.use_q)
+    TRAIN_DATASET = PartNormalDataset(root=datapath, npoints=args.npoint, task=args.task, split='train', normal_channel=args.normal, use_q=args.use_q, use_s=args.use_s, obj=args.obj)
     trainDataLoader = torch.utils.data.DataLoader(TRAIN_DATASET, batch_size=args.batch_size, shuffle=True, num_workers=10, drop_last=True)
-    VAL_DATASET = PartNormalDataset(root=datapath, npoints=args.npoint, task=args.task, split='val', normal_channel=args.normal, use_q=args.use_q)
+    VAL_DATASET = PartNormalDataset(root=datapath, npoints=args.npoint, task=args.task, split='val', normal_channel=args.normal, use_q=args.use_q, use_s=args.use_s, obj=args.obj)
     valDataLoader = torch.utils.data.DataLoader(VAL_DATASET, batch_size=args.batch_size, shuffle=False, num_workers=10)
     log_string("The number of training data is: %d" % len(TRAIN_DATASET))
     log_string("The number of val data is: %d" % len(VAL_DATASET))
 
-    if args.use_q:
+    writer = SummaryWriter(f'runs/{args.log_dir}')
+
+    # # testing dataloader
+    # next(iter(trainDataLoader))
+
+    if args.use_q and args.use_s:
         k = 6
     else:
         k = 3
@@ -119,7 +128,7 @@ def main(args):
     shutil.copy('models/%s.py' % args.model, str(exp_dir))
     shutil.copy('models/pointnet2_utils.py', str(exp_dir))
 
-    classifier = MODEL.get_model(k, normal_channel=args.normal).cuda()
+    classifier = MODEL.get_model(k, normal_channel=args.normal, use_q=args.use_q, use_s=args.use_s).cuda()
     criterion = MODEL.get_loss(mat_diff_loss_scale=args.mat_diff_loss_scale, axis_loss_scale=args.axis_loss_scale).cuda()
     classifier.apply(inplace_relu)
 
@@ -189,15 +198,33 @@ def main(args):
             optimizer.zero_grad()
 
             points = points.data.numpy()
-            # TODO: verify augmentations
-            points[:, :, 0:3] = provider.random_scale_point_cloud(points[:, :, 0:3])
-            points[:, :, 0:3] = provider.shift_point_cloud(points[:, :, 0:3])
+            # TODO: verify augmentations. Change later
+            # points[:, :, 0:3] = provider.random_scale_point_cloud(points[:, :, 0:3])
+            # points[:, :, 0:3] = provider.shift_point_cloud(points[:, :, 0:3])
             points = torch.Tensor(points)
             points, target = points.float().cuda(), target.float().cuda()
             points = points.transpose(2, 1)
 
             axis_pred, trans_feat = classifier(points)
-            # print('axis_pred: ', axis_pred.shape, type(axis_pred), axis_pred.dtype)
+            print("IN TRAIN LOOP points, axis_pred, target: ", points.shape, axis_pred.shape, target.shape)
+            
+            # # Visualize the 0th element in the batch for pred and targets for training
+            # vis_points = points[0].transpose(1, 0).cpu().detach().numpy()
+            # vis_axis_pred = axis_pred.cpu().detach().numpy()
+            # vis_target = target.cpu().detach().numpy()
+            # if args.use_q:
+            #     vis_axis_pred = vis_axis_pred[0].reshape(2,3)
+            #     vis_target = vis_target[0].reshape(2,3)
+            # else:
+            #     vis_axis_pred = vis_axis_pred[0]
+            #     vis_target = vis_target[0]
+            # visualize_pcl_axis([vis_axis_pred, vis_target], vis_points.shape[0], vis_points[:, :3], savepath='/home/arpit/test_projects/bimanual_predictor/temp.png', use_q=args.use_q)
+
+            # # remove later
+            # with torch.no_grad():
+            #     for i, a in enumerate(axis_pred):
+            #         axis_pred[i] = axis_pred[i] / torch.norm(axis_pred[i])
+            #     print('axis_pred: ', axis_pred.shape, type(axis_pred), axis_pred.dtype)
             # print('target: ', target.shape, type(target), target.dtype)
             loss_dict = criterion(axis_pred, target, trans_feat)
             loss = loss_dict['total']
@@ -212,6 +239,10 @@ def main(args):
         train_metrics['mat_diff_loss'] = np.mean(train_losses['mat_diff'])
         log_string('Train Loss:\t Total: {:.4f} Axis: {:.4f} MatDiff: {:.4f}'.format(
             train_metrics['total_loss'], train_metrics['axis_loss'], train_metrics['mat_diff_loss']))
+        
+        for k, v in train_metrics.items():
+            writer.add_scalar(
+                f'train_loss/{k}', v, global_step=epoch)
 
         with torch.no_grad():
             val_metrics = {}
@@ -221,16 +252,27 @@ def main(args):
 
             for batch_id, (points, target) in tqdm(enumerate(valDataLoader), total=len(valDataLoader), smoothing=0.9):
                 cur_batch_size, NUM_POINT, _ = points.size()
+                # print("---------^&&&&", points.shape)
                 points, target = points.float().cuda(), target.float().cuda()
                 points = points.transpose(2, 1)
                 axis_pred, trans_feat = classifier(points)
+                # remove later
+                # for i, a in enumerate(axis_pred):
+                #     axis_pred[i] = axis_pred[i] / torch.norm(axis_pred[i])
+                #     print("val: axis_pred, target: ", axis_pred[i], target[i])
                 loss_dict = criterion(axis_pred, target, trans_feat)
                 val_losses['total'].append(loss_dict['total'].item())
                 val_losses['axis'].append(loss_dict['axis'].item())
                 val_losses['mat_diff'].append(loss_dict['mat_diff'].item())
-                
+                print("val_losses['total']: ", val_losses['total'])
+
             # save visualization of predictions
-            if epoch % 50 == 0:
+            tensorboard_log = {
+                'target_q': [],
+                'pred_q': [],
+                'q_diff': []
+            }
+            if epoch % 100 == 0:
                 points = points.transpose(2, 1).cpu().numpy()
                 axis_pred = axis_pred.cpu().data.numpy()
                 target = target.cpu().data.numpy()
@@ -239,15 +281,46 @@ def main(args):
                 for i in range(cur_batch_size):
                     axisp = axis_pred[i, :]
                     axisl = target[i, :]
+                    tensorboard_log['target_q'].append([round(e, 2) for e in axisl])
+                    tensorboard_log['pred_q'].append([round(e, 2) for e in axisp])
+                    tensorboard_log['q_diff'].append(np.linalg.norm(axisp - axisl))
                     savepath = savedir.joinpath(f'{i:02d}.png')
-                    visualize_pcl_axis([axisl, axisp], NUM_POINT, points[i,:,:3], savepath, use_q=args.use_q)
-
+                    if args.use_q and args.use_s:
+                        axisl = axisl.reshape(2,3)
+                        axisp = axisp.reshape(2,3)
+                    visualize_pcl_axis([axisl, axisp], NUM_POINT, points[i,:,:3], savepath, use_q=args.use_q, use_s=args.use_s, writer=writer, epoch=epoch)
+                print("tensorboard_log: ", tensorboard_log.keys(), len(tensorboard_log['pred_q']))  
+                log_val_q(tensorboard_log, writer, epoch)
+            
             val_metrics['total_loss'] = np.mean(val_losses['total'])
             val_metrics['axis_loss'] = np.mean(val_losses['axis'])
             val_metrics['mat_diff_loss'] = np.mean(val_losses['mat_diff'])
 
-        log_string('Epoch %d Val loss\t total: {:.4f} axis: {:.4f} mat diff: {:.4f}' .format(
+        log_string('Epoch {} Val loss\t total: {:.4f} axis: {:.4f} mat diff: {:.4f}' .format(
             epoch + 1, val_metrics['total_loss'], val_metrics['axis_loss'], val_metrics['mat_diff_loss']))
+        
+        for k, v in val_metrics.items():
+            writer.add_scalar(
+                f'val_loss/{k}', v, global_step=epoch)
+
+        
+        if epoch % 500 == 0:
+            logger.info('Save model...')
+            savepath = str(checkpoints_dir) + f'/{epoch}.pth'
+            log_string('Saving at %s' % savepath)
+            state = {
+                'epoch': epoch,
+                'train_total_loss': train_metrics['total_loss'],
+                'train_axis_loss': train_metrics['axis_loss'],
+                'train_mat_diff_loss': train_metrics['mat_diff_loss'],
+                'val_total_loss': val_metrics['total_loss'],
+                'val_axis_loss': val_metrics['axis_loss'],
+                'val_mat_diff_loss': val_metrics['mat_diff_loss'],
+                'model_state_dict': classifier.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+            }
+            torch.save(state, savepath)
+            log_string('Saving model....')
         
         if (val_metrics['total_loss'] <= best_total_loss):
             logger.info('Save model...')
@@ -267,6 +340,8 @@ def main(args):
             torch.save(state, savepath)
             log_string('Saving model....')
 
+        # remove later
+        # if epoch > 3:
         if val_metrics['total_loss'] < best_total_loss:
             best_total_loss = val_metrics['total_loss']
         if val_metrics['axis_loss'] < best_axis_loss:
